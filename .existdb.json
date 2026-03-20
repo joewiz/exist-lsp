@@ -1,0 +1,30 @@
+{
+    "servers": {
+        "localhost": {
+            "server": "http://localhost:8080/exist",
+            "user": "admin",
+            "password": "",
+            "root": "/db/system/repo/lsp"
+        }
+    },
+    "sync": {
+        "server": "localhost",
+        "ignore": [
+            ".existdb.json",
+            ".git/**",
+            "node_modules/**",
+            "package*.json",
+            ".vscode/**"
+        ]
+    },
+    "package": {
+        "author": "eXist-db Project",
+        "target": "lsp",
+        "description": "Language Server Protocol support functions for eXist-db XQuery development",
+        "namespace": "http://exist-db.org/apps/lsp",
+        "website": "https://github.com/joewiz/exist-lsp",
+        "status": "stable",
+        "title": "LSP Module",
+        "license": "LGPL-2.1"
+    }
+}

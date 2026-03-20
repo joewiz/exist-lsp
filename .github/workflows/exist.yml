@@ -1,0 +1,135 @@
+# This workflow builds a xar archive, deploys it into exist and runs a smoke test.
+
+name: exist-db CI
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+       fail-fast: false
+       matrix:
+         exist-version: [latest, release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build with Maven
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build with Maven
+        run: mvn clean package -DskipTests -q
+
+      # Deploy XAR in Container
+      - name: Pull eXist-db image
+        run: docker pull duncdrum/existdb:${{ matrix.exist-version }}
+
+      - name: Start eXist-db container
+        run: |
+          docker run -dit -p 8080:8080 \
+          -v ${{ github.workspace }}/target:/exist/autodeploy \
+          --name exist --rm --health-interval=1s --health-start-period=1s \
+          duncdrum/existdb:${{ matrix.exist-version }}
+
+      - name: Wait for eXist-db to start and deploy packages
+        timeout-minutes: 5
+        run: |
+          while ! docker logs exist | grep -q "Server has started"; \
+          do sleep 6s; \
+          done
+          sleep 5
+
+      # Smoke test: verify module loads and functions work
+      - name: Test lsp:diagnostics on valid expression
+        run: |
+          result=$(curl -sf -u admin: -H "Content-Type: application/xml" --data '
+          <query xmlns="http://exist.sourceforge.net/NS/exist">
+            <text><![CDATA[
+              import module namespace lsp = "http://exist-db.org/xquery/lsp";
+              array:size(lsp:diagnostics("let $x := 1 return $x"))
+            ]]></text>
+          </query>' "http://localhost:8080/exist/rest/db")
+          echo "$result"
+          echo "$result" | grep -q ">0<" || (echo "FAIL: expected 0 diagnostics" && exit 1)
+
+      - name: Test lsp:diagnostics detects syntax error
+        run: |
+          result=$(curl -sf -u admin: -H "Content-Type: application/xml" --data '
+          <query xmlns="http://exist.sourceforge.net/NS/exist">
+            <text><![CDATA[
+              import module namespace lsp = "http://exist-db.org/xquery/lsp";
+              array:size(lsp:diagnostics("let $x := 1 retrun $x"))
+            ]]></text>
+          </query>' "http://localhost:8080/exist/rest/db")
+          echo "$result"
+          echo "$result" | grep -q ">1<" || (echo "FAIL: expected 1 diagnostic" && exit 1)
+
+      - name: Test lsp:symbols extracts function declaration
+        run: |
+          result=$(curl -sf -u admin: -H "Content-Type: application/xml" --data '
+          <query xmlns="http://exist.sourceforge.net/NS/exist">
+            <text><![CDATA[
+              import module namespace lsp = "http://exist-db.org/xquery/lsp";
+              let $s := lsp:symbols("declare function local:foo() { () }; local:foo()")
+              return $s(1)?name
+            ]]></text>
+          </query>' "http://localhost:8080/exist/rest/db")
+          echo "$result"
+          echo "$result" | grep -q "local:foo#0" || (echo "FAIL: expected local:foo#0" && exit 1)
+
+      - name: Test lsp:completions returns built-in functions
+        run: |
+          result=$(curl -sf -u admin: -H "Content-Type: application/xml" --data '
+          <query xmlns="http://exist.sourceforge.net/NS/exist">
+            <text><![CDATA[
+              import module namespace lsp = "http://exist-db.org/xquery/lsp";
+              array:size(lsp:completions("")) > 0
+            ]]></text>
+          </query>' "http://localhost:8080/exist/rest/db")
+          echo "$result"
+          echo "$result" | grep -q "true" || (echo "FAIL: expected completions" && exit 1)
+
+      - name: Test lsp:hover on built-in function
+        run: |
+          result=$(curl -sf -u admin: -H "Content-Type: application/xml" --data '
+          <query xmlns="http://exist.sourceforge.net/NS/exist">
+            <text><![CDATA[
+              import module namespace lsp = "http://exist-db.org/xquery/lsp";
+              lsp:hover("fn:count((1,2,3))", 0, 3)?kind
+            ]]></text>
+          </query>' "http://localhost:8080/exist/rest/db")
+          echo "$result"
+          echo "$result" | grep -q "function" || (echo "FAIL: expected function" && exit 1)
+
+      - name: Test lsp:definition resolves user function
+        run: |
+          result=$(curl -sf -u admin: -H "Content-Type: application/xml" --data '
+          <query xmlns="http://exist.sourceforge.net/NS/exist">
+            <text><![CDATA[
+              import module namespace lsp = "http://exist-db.org/xquery/lsp";
+              let $xq := "declare function local:greet() { 42 };&#10;local:greet()"
+              return lsp:definition($xq, 1, 5)?name
+            ]]></text>
+          </query>' "http://localhost:8080/exist/rest/db")
+          echo "$result"
+          echo "$result" | grep -q "local:greet#0" || (echo "FAIL: expected local:greet#0" && exit 1)
+
+      - name: Test lsp:references finds all usages
+        run: |
+          result=$(curl -sf -u admin: -H "Content-Type: application/xml" --data '
+          <query xmlns="http://exist.sourceforge.net/NS/exist">
+            <text><![CDATA[
+              import module namespace lsp = "http://exist-db.org/xquery/lsp";
+              let $xq := "declare function local:greet() { 42 };&#10;local:greet(),&#10;local:greet()"
+              return array:size(lsp:references($xq, 1, 5))
+            ]]></text>
+          </query>' "http://localhost:8080/exist/rest/db")
+          echo "$result"
+          count=$(echo "$result" | grep -oP '>\K[0-9]+(?=<)')
+          [ "$count" -ge 2 ] || (echo "FAIL: expected >= 2 references, got $count" && exit 1)
