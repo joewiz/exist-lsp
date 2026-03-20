@@ -13,7 +13,7 @@ jobs:
          exist-version: [latest, release]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Build with Maven
       - name: Set up JDK 21
