@@ -154,25 +154,37 @@ public class Fetch extends BasicFunction {
      */
     private String serializeItem(final Item item) throws XPathException {
         try {
-            final java.io.StringWriter writer = new java.io.StringWriter();
-            final Properties props = new Properties();
-            props.setProperty("method", "adaptive");
-            props.setProperty("indent", "yes");
-            final org.exist.storage.serializers.Serializer serializer =
-                    context.getBroker().borrowSerializer();
-            try {
-                serializer.setProperties(props);
-                if (item instanceof Node) {
-                    serializer.serialize((org.exist.dom.persistent.NodeProxy) item, writer);
-                } else {
-                    writer.write(item.getStringValue());
+            if (item instanceof NodeProxy proxy) {
+                // Persistent database node — use the broker's serializer
+                final java.io.StringWriter writer = new java.io.StringWriter();
+                final org.exist.storage.serializers.Serializer serializer =
+                        context.getBroker().borrowSerializer();
+                try {
+                    final Properties props = new Properties();
+                    props.setProperty("method", "adaptive");
+                    props.setProperty("indent", "yes");
+                    serializer.setProperties(props);
+                    serializer.serialize(proxy, writer);
+                } finally {
+                    context.getBroker().returnSerializer(serializer);
                 }
-            } finally {
-                context.getBroker().returnSerializer(serializer);
+                return writer.toString();
+            } else if (item instanceof org.exist.dom.memtree.NodeImpl memNode) {
+                // In-memory constructed node — serialize via XQuerySerializer
+                final java.io.StringWriter writer = new java.io.StringWriter();
+                final Properties props = new Properties();
+                props.setProperty("method", "adaptive");
+                props.setProperty("indent", "yes");
+                final org.exist.util.serializer.XQuerySerializer xqs =
+                        new org.exist.util.serializer.XQuerySerializer(
+                                context.getBroker(), props, writer);
+                xqs.serialize(memNode.toSequence());
+                return writer.toString();
+            } else {
+                // Atomic value
+                return item.getStringValue();
             }
-            return writer.toString();
         } catch (final Exception e) {
-            // Fallback to string value
             return item.getStringValue();
         }
     }
