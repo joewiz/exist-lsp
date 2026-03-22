@@ -30,6 +30,7 @@ import org.exist.xquery.XPathException;
 import org.exist.xquery.XQueryContext;
 import org.exist.xquery.functions.array.ArrayType;
 import org.exist.xquery.functions.map.MapType;
+import org.exist.xquery.value.AtomicValue;
 import org.exist.xquery.value.IntegerValue;
 import org.exist.xquery.value.Item;
 import org.exist.xquery.value.Sequence;
@@ -38,6 +39,7 @@ import org.exist.xquery.value.Type;
 
 import org.w3c.dom.Node;
 
+import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
@@ -59,6 +61,11 @@ import static org.exist.xquery.FunctionDSL.*;
  *
  * <p>Only the requested items are serialized — items outside the page
  * remain as live node references in the cursor.</p>
+ *
+ * <p>An optional 4th argument accepts a map of
+ * <a href="https://qt4cg.org/specifications/xslt-xquery-serialization-40/Overview.html">
+ * serialization parameters</a> (e.g., {@code map { "method": "xml", "indent": "no" }}).
+ * Defaults to {@code method=adaptive, indent=yes}.</p>
  */
 public class Fetch extends BasicFunction {
 
@@ -70,7 +77,10 @@ public class Fetch extends BasicFunction {
             Only the requested items are serialized; the rest remain as live references. \
             Returns an array of maps with keys: value (xs:string, serialized item), \
             type (xs:string, XDM type), documentURI (xs:string, source document path or ""), \
-            and nodeId (xs:string, internal node ID or "").""";
+            and nodeId (xs:string, internal node ID or ""). \
+            An optional 4th argument accepts a map of W3C serialization parameters \
+            (e.g., map { "method": "xml", "indent": "no" }). \
+            Defaults to method=adaptive, indent=yes.""";
 
     public static final FunctionSignature[] FS_FETCH = functionSignatures(
             LspModule.qname(FS_FETCH_NAME),
@@ -81,6 +91,16 @@ public class Fetch extends BasicFunction {
                             param("cursor", Type.STRING, "The cursor ID returned by lsp:eval()."),
                             param("start", Type.INTEGER, "1-based start position."),
                             param("count", Type.INTEGER, "Number of items to retrieve.")
+                    ),
+                    arity(
+                            param("cursor", Type.STRING, "The cursor ID returned by lsp:eval()."),
+                            param("start", Type.INTEGER, "1-based start position."),
+                            param("count", Type.INTEGER, "Number of items to retrieve."),
+                            param("serialization", Type.MAP_ITEM, "Serialization parameters map. " +
+                                    "Supports all W3C serialization parameters: method, indent, " +
+                                    "omit-xml-declaration, encoding, media-type, item-separator, etc. " +
+                                    "Also supports eXist-specific: highlight-matches (boolean). " +
+                                    "Defaults: method=adaptive, indent=yes.")
                     )
             )
     );
@@ -95,6 +115,25 @@ public class Fetch extends BasicFunction {
         final int start = ((IntegerValue) args[1].itemAt(0)).getInt();
         final int count = ((IntegerValue) args[2].itemAt(0)).getInt();
 
+        // Build serialization properties from optional 4th argument or defaults
+        final Properties serProps = new Properties();
+        serProps.setProperty("method", "adaptive");
+        serProps.setProperty("indent", "yes");
+        boolean highlightMatches = false;
+
+        if (getArgumentCount() == 4 && args[3].hasOne()) {
+            final MapType optionsMap = (MapType) args[3].itemAt(0);
+            for (final var entry : optionsMap) {
+                final String key = entry.key().getStringValue();
+                final String val = entry.value().getStringValue();
+                if ("highlight-matches".equals(key)) {
+                    highlightMatches = "yes".equals(val) || "true".equals(val) || "both".equals(val);
+                } else {
+                    serProps.setProperty(key, val);
+                }
+            }
+        }
+
         final CursorStore.CursorEntry entry = CursorStore.getInstance().get(cursorId);
         if (entry == null) {
             throw new XPathException(this, "Cursor not found or expired: " + cursorId);
@@ -108,16 +147,13 @@ public class Fetch extends BasicFunction {
         logger.debug("lsp:fetch cursor={} start={} count={} (total={})", cursorId, actualStart, count, total);
 
         final List<Sequence> items = new ArrayList<>();
-        final Properties serializeProps = new Properties();
-        serializeProps.setProperty("method", "adaptive");
-        serializeProps.setProperty("indent", "yes");
 
         for (int i = actualStart; i <= actualEnd; i++) {
             final Item item = result.itemAt(i - 1); // 0-based internal index
             final MapType map = new MapType(this, context);
 
             // Serialize just this one item
-            final String serialized = serializeItem(item);
+            final String serialized = serializeItem(item, serProps, highlightMatches);
             map.add(new StringValue(this, "value"), new StringValue(this, serialized));
 
             // Type info
@@ -150,38 +186,43 @@ public class Fetch extends BasicFunction {
     }
 
     /**
-     * Serialize a single item using adaptive output method.
+     * Serialize a single item using the given serialization properties.
+     *
+     * <p>For persistent database nodes, uses the broker's serializer which
+     * supports highlight-matches expansion. For in-memory nodes, uses
+     * XQuerySerializer. For atomic values, returns the string value directly.</p>
      */
-    private String serializeItem(final Item item) throws XPathException {
+    private String serializeItem(final Item item, final Properties props,
+                                  final boolean highlightMatches) throws XPathException {
         try {
             if (item instanceof NodeProxy proxy) {
                 // Persistent database node — use the broker's serializer
-                final java.io.StringWriter writer = new java.io.StringWriter();
+                // which supports highlight-matches and full serialization params
+                final StringWriter writer = new StringWriter();
                 final org.exist.storage.serializers.Serializer serializer =
                         context.getBroker().borrowSerializer();
                 try {
-                    final Properties props = new Properties();
-                    props.setProperty("method", "adaptive");
-                    props.setProperty("indent", "yes");
                     serializer.setProperties(props);
+                    if (highlightMatches) {
+                        serializer.setProperty(
+                                org.exist.storage.serializers.EXistOutputKeys.HIGHLIGHT_MATCHES,
+                                "both");
+                    }
                     serializer.serialize(proxy, writer);
                 } finally {
                     context.getBroker().returnSerializer(serializer);
                 }
                 return writer.toString();
-            } else if (item instanceof org.exist.dom.memtree.NodeImpl memNode) {
+            } else if (item instanceof org.exist.dom.memtree.NodeImpl) {
                 // In-memory constructed node — serialize via XQuerySerializer
-                final java.io.StringWriter writer = new java.io.StringWriter();
-                final Properties props = new Properties();
-                props.setProperty("method", "adaptive");
-                props.setProperty("indent", "yes");
+                final StringWriter writer = new StringWriter();
                 final org.exist.util.serializer.XQuerySerializer xqs =
                         new org.exist.util.serializer.XQuerySerializer(
                                 context.getBroker(), props, writer);
-                xqs.serialize(memNode.toSequence());
+                xqs.serialize(item.toSequence());
                 return writer.toString();
             } else {
-                // Atomic value
+                // Atomic value — string representation
                 return item.getStringValue();
             }
         } catch (final Exception e) {
