@@ -48,12 +48,18 @@ public class LspModule extends AbstractInternalModule {
     public static final String RELEASE = "0.9.0-SNAPSHOT";
 
     public static final FunctionDef[] functions = functionDefs(
+            functionDefs(Close.class,
+                    Close.FS_CLOSE),
             functionDefs(Completions.class,
                     Completions.FS_COMPLETIONS),
             functionDefs(Definition.class,
                     Definition.FS_DEFINITION),
             functionDefs(Diagnostics.class,
                     Diagnostics.FS_DIAGNOSTICS),
+            functionDefs(Eval.class,
+                    Eval.FS_EVAL),
+            functionDefs(Fetch.class,
+                    Fetch.FS_FETCH),
             functionDefs(Hover.class,
                     Hover.FS_HOVER),
             functionDefs(References.class,

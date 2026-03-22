@@ -58,6 +58,20 @@
             <artifactId>exist-core</artifactId>
             <version>${exist.version}</version>
             <scope>provided</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>xalan</groupId>
+                    <artifactId>xalan</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>xalan</groupId>
+                    <artifactId>serializer</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.fifesoft</groupId>
+                    <artifactId>rsyntaxtextarea</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
     </dependencies>
