@@ -38,38 +38,90 @@ import java.util.concurrent.TimeUnit;
  * clients to paginate through query results without re-executing the query
  * or serializing the entire result set upfront.</p>
  *
- * <p>Cursors expire after 5 minutes of inactivity and the store holds at
- * most 100 concurrent cursors. Evicted sequences are released for GC.</p>
+ * <p>The store is a singleton shared across all XQuery contexts within the
+ * same eXist-db instance. It is configured at module initialization time
+ * via {@link #configure(long, long, long)}.</p>
  *
- * <p>This is a singleton shared across all XQuery contexts within the
- * same eXist-db instance.</p>
+ * <h3>Eviction policies</h3>
+ * <ul>
+ *   <li><b>Time-based</b>: cursors expire after a configurable period of
+ *       inactivity ({@code cursor.expireAfterAccess}, default 5 minutes)</li>
+ *   <li><b>Count-based</b>: at most N concurrent cursors
+ *       ({@code cursor.maximumSize}, default 100, LRU eviction)</li>
+ *   <li><b>Weight-based</b>: optional total memory budget across all cursors
+ *       ({@code cursor.maximumWeight}, default unlimited). Each cursor's
+ *       weight is estimated as {@code itemCount × 1024} bytes.</li>
+ * </ul>
+ *
+ * <p>When a cursor is evicted (by any policy) or explicitly closed, its
+ * eval context cleanup tasks are run to release broker resources.</p>
  */
 public final class CursorStore {
 
     private static final Logger logger = LogManager.getLogger(CursorStore.class);
 
-    private static final long EXPIRE_AFTER_ACCESS_MINUTES = 5;
-    private static final long MAXIMUM_SIZE = 100;
+    /** Estimated memory per result item for weight calculation (1 KB). */
+    private static final long ESTIMATED_BYTES_PER_ITEM = 1024;
+
+    private static final long DEFAULT_MAXIMUM_SIZE = 100;
+    private static final long DEFAULT_EXPIRE_AFTER_ACCESS_MS = 300_000; // 5 min
 
     private static final CursorStore INSTANCE = new CursorStore();
 
-    private final Cache<String, CursorEntry> store;
+    private volatile Cache<String, CursorEntry> store;
 
     private CursorStore() {
-        store = Caffeine.newBuilder()
-                .expireAfterAccess(EXPIRE_AFTER_ACCESS_MINUTES, TimeUnit.MINUTES)
-                .maximumSize(MAXIMUM_SIZE)
-                .removalListener((key, value, cause) -> {
-                        logger.debug("Cursor {} evicted ({})", key, cause);
-                        if (value instanceof CursorEntry entry && entry.evalContext() != null) {
-                            entry.evalContext().runCleanupTasks();
-                        }
-                })
-                .build();
+        // Initialize with defaults; configure() may replace this later
+        store = buildCache(DEFAULT_MAXIMUM_SIZE, DEFAULT_EXPIRE_AFTER_ACCESS_MS, 0);
     }
 
     public static CursorStore getInstance() {
         return INSTANCE;
+    }
+
+    /**
+     * (Re)configure the cursor store. Called from {@link LspModule} constructor
+     * when module parameters are available.
+     *
+     * @param maximumSize max concurrent cursors (0 = unlimited count)
+     * @param expireAfterAccessMs inactivity timeout in milliseconds
+     * @param maximumWeight max total estimated memory in bytes (0 = unlimited)
+     */
+    public static void configure(final long maximumSize, final long expireAfterAccessMs,
+                                  final long maximumWeight) {
+        // Invalidate all existing cursors before replacing the cache
+        INSTANCE.store.invalidateAll();
+        INSTANCE.store = buildCache(maximumSize, expireAfterAccessMs, maximumWeight);
+    }
+
+    private static Cache<String, CursorEntry> buildCache(final long maximumSize,
+                                                          final long expireAfterAccessMs,
+                                                          final long maximumWeight) {
+        final Caffeine<Object, Object> builder = Caffeine.newBuilder()
+                .expireAfterAccess(expireAfterAccessMs, TimeUnit.MILLISECONDS)
+                .removalListener((key, value, cause) -> {
+                    logger.debug("Cursor {} evicted ({})", key, cause);
+                    if (value instanceof CursorEntry entry && entry.evalContext() != null) {
+                        entry.evalContext().runCleanupTasks();
+                    }
+                });
+
+        if (maximumWeight > 0) {
+            // Weight-based eviction: each cursor's weight = itemCount * estimated bytes per item
+            builder.maximumWeight(maximumWeight)
+                    .weigher((key, value) -> {
+                        if (value instanceof CursorEntry entry) {
+                            return (int) Math.min(
+                                    (long) entry.itemCount() * ESTIMATED_BYTES_PER_ITEM,
+                                    Integer.MAX_VALUE);
+                        }
+                        return 1;
+                    });
+        } else if (maximumSize > 0) {
+            builder.maximumSize(maximumSize);
+        }
+
+        return builder.build();
     }
 
     /**
