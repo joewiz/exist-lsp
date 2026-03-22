@@ -99,8 +99,6 @@ public class Eval extends BasicFunction {
             moduleLoadPath = null;
         }
 
-        final long startTime = System.currentTimeMillis();
-
         // Copy the parent context to preserve broker, base URI, default collection,
         // and static context — same approach as util:eval() in Eval.doEval()
         final XQuery xqueryService = context.getBroker().getBrokerPool().getXQueryService();
@@ -114,31 +112,47 @@ public class Eval extends BasicFunction {
             final CompiledXQuery compiled;
             final Sequence result;
             try {
+                // Phase 1: Compile (parse + compile + analyze)
+                final long compileStart = System.currentTimeMillis();
                 compiled = xqueryService.compile(context.getBroker(), evalContext,
                         new StringSource(expr));
+                final long compileTime = System.currentTimeMillis() - compileStart;
+
+                // Phase 2: Evaluate
+                final long evalStart = System.currentTimeMillis();
                 result = xqueryService.execute(context.getBroker(), compiled, null);
+                final long evalTime = System.currentTimeMillis() - evalStart;
+
+                final int itemCount = result.getItemCount();
+                final long totalTime = compileTime + evalTime;
+
+                // Store in cursor — evalContext is kept alive so node references remain valid.
+                // Cleanup happens when the cursor is evicted or explicitly closed.
+                final String cursorId = UUID.randomUUID().toString();
+                CursorStore.getInstance().put(cursorId, result, itemCount, evalContext);
+
+                logger.debug("lsp:eval cursor={} items={} compile={}ms eval={}ms total={}ms",
+                        cursorId, itemCount, compileTime, evalTime, totalTime);
+
+                // Return metadata with timing breakdown
+                final MapType resultMap = new MapType(this, context);
+                resultMap.add(new StringValue(this, "cursor"), new StringValue(this, cursorId));
+                resultMap.add(new StringValue(this, "items"), new IntegerValue(this, itemCount));
+                resultMap.add(new StringValue(this, "elapsed"), new IntegerValue(this, totalTime));
+
+                final MapType timingMap = new MapType(this, context);
+                timingMap.add(new StringValue(this, "compile"), new IntegerValue(this, compileTime));
+                timingMap.add(new StringValue(this, "evaluate"), new IntegerValue(this, evalTime));
+                timingMap.add(new StringValue(this, "total"), new IntegerValue(this, totalTime));
+                resultMap.add(new StringValue(this, "timing"), timingMap);
+
+                return resultMap;
+
             } catch (final java.io.IOException e) {
                 throw new XPathException(this, "Failed to compile query: " + e.getMessage(), e);
             } catch (final org.exist.security.PermissionDeniedException e) {
                 throw new XPathException(this, "Permission denied: " + e.getMessage(), e);
             }
-
-            final long elapsed = System.currentTimeMillis() - startTime;
-            final int itemCount = result.getItemCount();
-
-            // Store in cursor — evalContext is kept alive so node references remain valid.
-            // Cleanup happens when the cursor is evicted or explicitly closed.
-            final String cursorId = UUID.randomUUID().toString();
-            CursorStore.getInstance().put(cursorId, result, itemCount, evalContext);
-
-            logger.debug("lsp:eval cursor={} items={} elapsed={}ms", cursorId, itemCount, elapsed);
-
-            // Return metadata
-            final MapType resultMap = new MapType(this, context);
-            resultMap.add(new StringValue(this, "cursor"), new StringValue(this, cursorId));
-            resultMap.add(new StringValue(this, "items"), new IntegerValue(this, itemCount));
-            resultMap.add(new StringValue(this, "elapsed"), new IntegerValue(this, elapsed));
-            return resultMap;
 
         } catch (final XPathException e) {
             // Compilation/evaluation failed — clean up immediately
