@@ -17,12 +17,17 @@ This module was originally proposed as part of exist-core ([PR #6130](https://gi
 
 ## Installation
 
-1. Download the `exist-lsp-0.9.0-SNAPSHOT.xar` file from the GitHub [releases](https://github.com/joewiz/exist-lsp/releases) page.
-
-2. Install it via the [dashboard](http://localhost:8080/exist/apps/dashboard/index.html) package manager, or use the [xst](https://www.npmjs.com/package/@existdb/xst) command-line tool:
+From a GitHub release:
 
 ```bash
-xst package install exist-lsp-0.9.0-SNAPSHOT.xar
+xst package install https://github.com/joewiz/exist-lsp/releases/download/v0.9.0-SNAPSHOT/exist-lsp-0.9.0-SNAPSHOT.xar
+```
+
+From a local build:
+
+```bash
+mvn package -DskipTests
+xst package install target/exist-lsp-0.9.0-SNAPSHOT.xar
 ```
 
 ### Building from source
